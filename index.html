@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Alicia's Tracker"/>
+<title>Alicia's Wellness Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: linear-gradient(145deg,#f0fafb,#f7f3ed,#eef7f0); font-family: Georgia, serif; min-height: 100vh; }
+  input:focus { border-color: #1A7A8A !important; box-shadow: 0 0 0 3px #1A7A8A22; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #f0f0f0; } ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+  @media (max-width: 480px) { .grid4 { grid-template-columns: repeat(2,1fr) !important; } .grid3 { grid-template-columns: repeat(2,1fr) !important; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+const API_KEY_STORAGE = "alicia_tracker_apikey";
+
+const GOALS = {
+  calories: { target:1525, min:1450, max:1600, unit:"kcal", label:"Calories",  color:"#1A7A8A" },
+  protein:  { target:130,  min:120,  max:140,  unit:"g",    label:"Protein",   color:"#2E7D32" },
+  carbs:    { target:135,  min:120,  max:150,  unit:"g",    label:"Carbs",     color:"#C97D20" },
+  fat:      { target:58,   min:50,   max:65,   unit:"g",    label:"Fat",       color:"#5E35B1" },
+  fiber:    { target:25,   min:20,   max:35,   unit:"g",    label:"Fiber",     color:"#00838F", note:"↓ LDL" },
+  vitaminD: { target:800,  min:400,  max:2000, unit:"IU",   label:"Vit D",     color:"#E65100", note:"⚑ Low" },
+  iron:     { target:18,   min:14,   max:27,   unit:"mg",   label:"Iron",      color:"#AD1457", note:"⚑ Ferritin" },
+  omega3:   { target:2000, min:1500, max:3000, unit:"mg",   label:"Omega-3",   color:"#1565C0", note:"↓ CRP" },
+};
+
+const PRESETS = [
+  "Goblet Squat","Romanian Deadlift (DB)","Hip Thrust","Walking Lunges",
+  "Dead Bug","Glute Bridge","DB Bench Press","Chest-Supported Row",
+  "Seated Row","Lateral Raise","Tricep Pushdown","Pallof Press","Swimming (easy)"
+];
+
+const TODAY = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+const STORE_KEY = "alicia_tracker_" + new Date().toDateString();
+
+function loadState() {
+  try { const s = localStorage.getItem(STORE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
+}
+function saveState(state) {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch {}
+}
+
+async function callClaude(system, userMsg, apiKey) {
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 500,
+      system,
+      messages: [{ role:"user", content: userMsg }]
+    })
+  });
+  if (!resp.ok) { const e = await resp.json(); throw new Error(e.error?.message || "API error"); }
+  const data = await resp.json();
+  return data.content.map(b => b.text||"").join("");
+}
+
+async function lookupNutrition(input, apiKey) {
+  const text = await callClaude(
+    `Nutrition database. Return ONLY valid JSON, no markdown.
+Schema: {"name":"string","calories":number,"protein":number,"carbs":number,"fat":number,"fiber":number,"vitaminD":number,"iron":number,"omega3":number}
+Units: calories=kcal, protein/carbs/fat/fiber=grams, vitaminD=IU, iron=mg, omega3=mg. Never null, use 0 if unknown.`,
+    `Nutrition for: ${input}`, apiKey
+  );
+  return JSON.parse(text.replace(/```json|```/g,"").trim());
+}
+
+async function lookupExercise(input, apiKey) {
+  const text = await callClaude(
+    `Fitness calculator for 46-year-old woman, 150 lbs (68kg). Return ONLY valid JSON, no markdown.
+Schema: {"name":"string","sets":number,"reps":number,"weight_lbs":number,"duration_min":number,"calories_burned":number,"muscle_group":"string","notes":"string"}
+Strength: estimate duration from sets×reps+rest. Calories = MET×68×hours. MET 4-5 strength, 6 swim easy. weight_lbs=0 if bodyweight. notes = brief form tip.`,
+    `Exercise: ${input}`, apiKey
+  );
+  return JSON.parse(text.replace(/```json|```/g,"").trim());
+}
+
+function Ring({ value, max, color, size=74, stroke=7 }) {
+  const r = (size-stroke)/2, circ = 2*Math.PI*r;
+  const fill = Math.min(value/max,1.08)*circ, over = value > max*1.05;
+  return (
+    <svg width={size} height={size} style={{transform:"rotate(-90deg)",flexShrink:0}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e8f2f3" strokeWidth={stroke}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={over?"#EF5350":color} strokeWidth={stroke}
+        strokeDasharray={`${Math.min(fill,circ)} ${circ}`} strokeLinecap="round"
+        style={{transition:"stroke-dasharray 0.5s ease"}}/>
+    </svg>
+  );
+}
+
+function MacroCard({ current, goal }) {
+  const good = current>=goal.min && current<=goal.max, over = current>goal.max*1.05;
+  const display = goal.unit==="mg"&&current<10 ? current.toFixed(1) : Math.round(current);
+  return (
+    <div style={{background:"white",borderRadius:14,padding:"12px 6px",display:"flex",flexDirection:"column",alignItems:"center",gap:4,
+      border:`1.5px solid ${good?goal.color+"55":"#eee"}`,boxShadow:good?`0 0 0 2px ${goal.color}22`:"0 1px 6px #0001",transition:"all 0.3s"}}>
+      <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <Ring value={current} max={goal.target} color={goal.color}/>
+        <div style={{position:"absolute",textAlign:"center",lineHeight:1.1}}>
+          <div style={{fontSize:12,fontWeight:800,color:over?"#EF5350":goal.color,fontFamily:"monospace"}}>{display}</div>
+          <div style={{fontSize:9,color:"#aaa"}}>{goal.unit}</div>
+        </div>
+      </div>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#333"}}>{goal.label}</div>
+        {goal.note&&<div style={{fontSize:9,color:goal.color,fontWeight:600}}>{goal.note}</div>}
+        <div style={{fontSize:9,color:"#bbb"}}>{goal.min}–{goal.max}</div>
+      </div>
+      {good&&<div style={{fontSize:9,background:goal.color+"18",color:goal.color,padding:"1px 7px",borderRadius:20,fontWeight:700}}>✓</div>}
+      {over&&<div style={{fontSize:9,background:"#fdecea",color:"#EF5350",padding:"1px 7px",borderRadius:20,fontWeight:700}}>OVER</div>}
+    </div>
+  );
+}
+
+function ApiKeySetup({ onSave }) {
+  const [key, setKey] = useState("");
+  return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:"linear-gradient(145deg,#f0fafb,#f7f3ed)"}}>
+      <div style={{background:"white",borderRadius:20,padding:28,maxWidth:400,width:"100%",boxShadow:"0 8px 40px #0002",border:"2px solid #1A7A8A33"}}>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{fontSize:36,marginBottom:8}}>🌿</div>
+          <h2 style={{fontSize:20,color:"#1A7A8A",fontWeight:900,marginBottom:4}}>Alicia's Wellness Tracker</h2>
+          <p style={{fontSize:12,color:"#888"}}>Enter your Anthropic API key to power the nutrition & exercise lookups. Your key is saved locally on this device only.</p>
+        </div>
+        <input value={key} onChange={e=>setKey(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&key.trim()&&onSave(key.trim())}
+          placeholder="sk-ant-api03-..."
+          type="password"
+          style={{width:"100%",padding:"12px 14px",borderRadius:11,border:"2px solid #c8e8eb",fontSize:13,fontFamily:"Georgia,serif",outline:"none",marginBottom:12}}/>
+        <button onClick={()=>key.trim()&&onSave(key.trim())} disabled={!key.trim()}
+          style={{width:"100%",padding:12,borderRadius:11,border:"none",background:key.trim()?"#1A7A8A":"#ccc",
+            color:"white",fontSize:14,fontWeight:700,cursor:key.trim()?"pointer":"default",fontFamily:"Georgia,serif"}}>
+          Get Started
+        </button>
+        <p style={{fontSize:10,color:"#bbb",textAlign:"center",marginTop:10}}>
+          Get your API key at console.anthropic.com · Never shared, stored locally only
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const saved = loadState();
+  const [apiKey, setApiKey] = useState(() => { try { return localStorage.getItem(API_KEY_STORAGE)||""; } catch { return ""; } });
+  const [tab, setTab] = useState("dashboard");
+  const [foods, setFoods] = useState(saved?.foods||[]);
+  const [exercises, setExercises] = useState(saved?.exercises||[]);
+  const [glasses, setGlasses] = useState(saved?.glasses||0);
+  const [foodInput, setFoodInput] = useState("");
+  const [exInput, setExInput] = useState("");
+  const [foodLoading, setFoodLoading] = useState(false);
+  const [exLoading, setExLoading] = useState(false);
+  const [foodError, setFoodError] = useState("");
+  const [exError, setExError] = useState("");
+  const foodRef = useRef(null);
+  const exRef = useRef(null);
+
+  useEffect(() => { saveState({ foods, exercises, glasses }); }, [foods, exercises, glasses]);
+
+  function saveKey(k) {
+    try { localStorage.setItem(API_KEY_STORAGE, k); } catch {}
+    setApiKey(k);
+  }
+
+  if (!apiKey) return <ApiKeySetup onSave={saveKey}/>;
+
+  const nt = foods.reduce((acc,f) => { Object.keys(f.n).forEach(k=>{ acc[k]=(acc[k]||0)+(f.n[k]||0); }); return acc; }, {});
+  const totalBurned = exercises.reduce((s,e)=>s+(e.data.calories_burned||0),0);
+  const calEaten = nt.calories||0, netCal = calEaten-totalBurned;
+  const netGood = netCal>=1350&&netCal<=1700;
+  const totalVolume = exercises.reduce((s,e)=>s+((e.data.sets||0)*(e.data.reps||0)*(e.data.weight_lbs||0)),0);
+
+  async function addFood() {
+    if (!foodInput.trim()||foodLoading) return;
+    setFoodLoading(true); setFoodError("");
+    try {
+      const n = await lookupNutrition(foodInput.trim(), apiKey);
+      setFoods(p=>[...p,{id:Date.now(),n}]);
+      setFoodInput("");
+    } catch(e) { setFoodError("Try: '5 oz grilled chicken' or '1 cup oats with walnuts'. "+e.message); }
+    setFoodLoading(false); foodRef.current?.focus();
+  }
+
+  async function addExercise() {
+    if (!exInput.trim()||exLoading) return;
+    setExLoading(true); setExError("");
+    try {
+      const data = await lookupExercise(exInput.trim(), apiKey);
+      setExercises(p=>[...p,{id:Date.now(),data}]);
+      setExInput("");
+    } catch(e) { setExError("Try: '3 sets 10 goblet squats 25 lbs' or '30 min swim'. "+e.message); }
+    setExLoading(false); exRef.current?.focus();
+  }
+
+  const tabs = [{id:"dashboard",label:"📊 Dashboard"},{id:"food",label:"🥗 Food Log"},{id:"workout",label:"💪 Workout"}];
+
+  return (
+    <div style={{minHeight:"100vh",background:"linear-gradient(145deg,#f0fafb,#f7f3ed,#eef7f0)",fontFamily:"Georgia,serif"}}>
+      {/* Header */}
+      <div style={{background:"linear-gradient(135deg,#1A7A8A,#145f6d)",padding:"14px 14px 0",color:"white",position:"sticky",top:0,zIndex:100}}>
+        <div style={{maxWidth:680,margin:"0 auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            <div>
+              <div style={{fontSize:9,letterSpacing:3,opacity:0.7,textTransform:"uppercase"}}>Daily Health Tracker</div>
+              <h1 style={{fontSize:17,margin:"2px 0 12px",fontWeight:900}}>Alicia's Wellness Journal</h1>
+            </div>
+            <button onClick={()=>{if(confirm("Change API key?")){ localStorage.removeItem(API_KEY_STORAGE); setApiKey(""); }}}
+              style={{background:"rgba(255,255,255,0.15)",border:"none",color:"white",borderRadius:8,padding:"4px 8px",fontSize:10,cursor:"pointer",marginTop:4}}>
+              ⚙️
+            </button>
+          </div>
+          <div style={{display:"flex",gap:2}}>
+            {tabs.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)}
+                style={{padding:"8px 14px",border:"none",cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"Georgia,serif",
+                  background:tab===t.id?"white":"transparent",color:tab===t.id?"#1A7A8A":"rgba(255,255,255,0.75)",
+                  borderRadius:"10px 10px 0 0",transition:"all 0.2s"}}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{maxWidth:680,margin:"0 auto",padding:"14px 12px 60px"}}>
+
+        {/* DASHBOARD */}
+        {tab==="dashboard"&&(
+          <div>
+            <div style={{background:"white",borderRadius:16,padding:"16px",marginBottom:12,border:`2px solid ${netGood?"#1A7A8A44":"#eee"}`}}>
+              <div style={{fontSize:10,color:"#888",marginBottom:4}}>{TODAY}</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}} className="grid3">
+                {[{label:"Eaten",val:Math.round(calEaten),color:"#1A7A8A"},{label:"Burned",val:Math.round(totalBurned),color:"#C97D20"},
+                  {label:"Net",val:Math.round(netCal),color:netGood?"#2E7D32":netCal>1700?"#EF5350":"#C97D20"}].map(s=>(
+                  <div key={s.label} style={{textAlign:"center",padding:"10px 6px",background:"#f8fefe",borderRadius:10}}>
+                    <div style={{fontSize:9,color:"#aaa"}}>{s.label}</div>
+                    <div style={{fontSize:22,fontWeight:900,color:s.color,fontFamily:"monospace",lineHeight:1.1}}>{s.val}</div>
+                    <div style={{fontSize:9,color:"#bbb"}}>kcal</div>
+                  </div>
+                ))}
+              </div>
+              {totalBurned>0&&(
+                <div style={{fontSize:11,color:"#C97D20",background:"#FFF3E0",padding:"6px 10px",borderRadius:8,marginBottom:10,textAlign:"center"}}>
+                  🔥 Burned {Math.round(totalBurned)} kcal — adjusted target: <strong>{Math.round(1525+totalBurned)} kcal</strong>
+                </div>
+              )}
+              <div style={{background:"#f0f0f0",borderRadius:10,height:10,overflow:"hidden"}}>
+                <div style={{height:"100%",width:`${Math.min((netCal/1700)*100,105)}%`,
+                  background:netGood?"linear-gradient(90deg,#1A7A8A,#2E7D32)":netCal>1700?"#EF5350":"#C97D20",
+                  borderRadius:10,transition:"width 0.5s ease"}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#ccc",marginTop:3}}>
+                <span>0</span><span>1,350</span><span>1,525</span><span>1,700</span>
+              </div>
+              <div style={{marginTop:6,textAlign:"right",fontSize:11,fontWeight:700,
+                color:netGood?"#2E7D32":netCal<1350?"#C97D20":"#EF5350"}}>
+                {netGood?"✓ On target!":netCal<1350?`Eat ${Math.round(1350-netCal)} more kcal`:`${Math.round(netCal-1700)} kcal over`}
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:8}} className="grid4">
+              {["protein","carbs","fat","fiber"].map(k=><MacroCard key={k} current={nt[k]||0} goal={GOALS[k]}/>)}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:12}} className="grid4">
+              {["vitaminD","iron","omega3"].map(k=><MacroCard key={k} current={nt[k]||0} goal={GOALS[k]}/>)}
+              <div style={{background:"white",borderRadius:14,padding:"12px 6px",display:"flex",flexDirection:"column",alignItems:"center",gap:4,
+                border:`1.5px solid ${glasses>=8?"#0277BD55":"#eee"}`}}>
+                <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <Ring value={glasses} max={8} color="#0277BD"/>
+                  <div style={{position:"absolute",textAlign:"center",lineHeight:1.1}}>
+                    <div style={{fontSize:12,fontWeight:800,color:"#0277BD",fontFamily:"monospace"}}>{glasses}</div>
+                    <div style={{fontSize:9,color:"#aaa"}}>glass</div>
+                  </div>
+                </div>
+                <div style={{fontSize:11,fontWeight:700,color:"#333"}}>Water 💧</div>
+                <div style={{fontSize:9,color:"#bbb"}}>Goal: 8</div>
+                <div style={{display:"flex",gap:4}}>
+                  <button onClick={()=>setGlasses(g=>Math.max(0,g-1))} style={{width:26,height:22,borderRadius:6,border:"1px solid #90CAF9",background:"white",cursor:"pointer",fontSize:12,color:"#0277BD",fontWeight:700}}>−</button>
+                  <button onClick={()=>setGlasses(g=>Math.min(12,g+1))} style={{width:26,height:22,borderRadius:6,border:"none",background:"#0277BD",cursor:"pointer",fontSize:12,color:"white",fontWeight:700}}>+</button>
+                </div>
+                {glasses>=8&&<div style={{fontSize:9,background:"#E3F2FD",color:"#0277BD",padding:"1px 7px",borderRadius:20,fontWeight:700}}>✓</div>}
+              </div>
+            </div>
+
+            {exercises.length>0&&(
+              <div style={{background:"white",borderRadius:14,padding:"12px 14px",border:"1.5px solid #C97D2044",marginBottom:12}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#C97D20",marginBottom:8}}>🏋️ Workout Summary</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}} className="grid3">
+                  {[{label:"Exercises",val:exercises.length,unit:"logged"},
+                    {label:"Volume",val:totalVolume>0?`${Math.round(totalVolume).toLocaleString()}`:"BW",unit:totalVolume>0?"lbs":"only"},
+                    {label:"Burned",val:Math.round(totalBurned),unit:"kcal"}].map(s=>(
+                    <div key={s.label} style={{textAlign:"center",background:"#FFF8F0",borderRadius:8,padding:"8px 4px"}}>
+                      <div style={{fontSize:9,color:"#aaa"}}>{s.label}</div>
+                      <div style={{fontSize:18,fontWeight:900,color:"#C97D20",fontFamily:"monospace"}}>{s.val}</div>
+                      <div style={{fontSize:9,color:"#bbb"}}>{s.unit}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{background:"white",borderRadius:14,padding:"12px 14px",border:"1.5px solid #eee"}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#555",marginBottom:8}}>Quick Add</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={()=>{setTab("food");setTimeout(()=>foodRef.current?.focus(),100)}}
+                  style={{padding:"8px 14px",borderRadius:20,border:"1.5px solid #1A7A8A",background:"#f0fafb",color:"#1A7A8A",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                  ➕ Log Food
+                </button>
+                <button onClick={()=>{setTab("workout");setTimeout(()=>exRef.current?.focus(),100)}}
+                  style={{padding:"8px 14px",borderRadius:20,border:"1.5px solid #C97D20",background:"#FFF8F0",color:"#C97D20",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                  💪 Log Exercise
+                </button>
+                <button onClick={()=>setGlasses(g=>Math.min(12,g+1))}
+                  style={{padding:"8px 14px",borderRadius:20,border:"1.5px solid #0277BD",background:"#E3F2FD",color:"#0277BD",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                  💧 +1 Glass
+                </button>
+                <button onClick={()=>{if(confirm("Clear all today's data?")){ setFoods([]); setExercises([]); setGlasses(0); }}}
+                  style={{padding:"8px 14px",borderRadius:20,border:"1.5px solid #EF5350",background:"#fdecea",color:"#EF5350",cursor:"pointer",fontSize:11,fontWeight:700}}>
+                  🗑 Reset Day
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* FOOD LOG */}
+        {tab==="food"&&(
+          <div>
+            <div style={{background:"white",borderRadius:18,padding:"16px",marginBottom:12,border:"2.5px solid #1A7A8A66",boxShadow:"0 4px 20px #1A7A8A12"}}>
+              <div style={{fontSize:14,fontWeight:800,color:"#1A7A8A",marginBottom:2}}>➕ Add Food</div>
+              <div style={{fontSize:11,color:"#999",marginBottom:10}}>
+                "5 oz chicken thigh no skin" · "half avocado" · "1 cup GF oats + walnuts" · "medium decaf coffee hazelnut creamer"
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <input ref={foodRef} value={foodInput} onChange={e=>setFoodInput(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&addFood()} placeholder="What did you eat?" disabled={foodLoading}
+                  style={{flex:1,padding:"11px 13px",borderRadius:11,border:"2px solid #c8e8eb",fontSize:13,
+                    fontFamily:"Georgia,serif",outline:"none",background:foodLoading?"#f5f5f5":"#f0fafb"}}/>
+                <button onClick={addFood} disabled={foodLoading||!foodInput.trim()}
+                  style={{padding:"11px 18px",borderRadius:11,border:"none",
+                    background:!foodLoading&&foodInput.trim()?"#1A7A8A":"#ccc",
+                    color:"white",fontSize:13,fontWeight:700,cursor:!foodLoading&&foodInput.trim()?"pointer":"default",
+                    fontFamily:"Georgia,serif",minWidth:68}}>
+                  {foodLoading?"⏳":"Add"}
+                </button>
+              </div>
+              {foodLoading&&<div style={{marginTop:8,fontSize:11,color:"#1A7A8A",textAlign:"center"}}>⏳ Looking up nutrition...</div>}
+              {foodError&&<div style={{marginTop:8,fontSize:11,color:"#EF5350",background:"#fdecea",padding:"7px 10px",borderRadius:8}}>{foodError}</div>}
+            </div>
+
+            {foods.length>0?(
+              <div style={{background:"white",borderRadius:15,padding:"14px",border:"1.5px solid #e0eef0"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#1a3a3a"}}>Today's Food — {foods.length} item{foods.length!==1?"s":""}</div>
+                  <button onClick={()=>setFoods([])} style={{fontSize:11,color:"#EF5350",background:"#fdecea",border:"none",borderRadius:7,padding:"3px 9px",cursor:"pointer"}}>Clear All</button>
+                </div>
+                {foods.map(f=>(
+                  <div key={f.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:"#f8fefe",borderRadius:10,marginBottom:5,border:"1px solid #e0eeef"}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,fontWeight:700,color:"#1a3a3a"}}>{f.n.name}</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:8,fontSize:10,marginTop:2}}>
+                        <span style={{color:"#1A7A8A",fontWeight:700}}>{Math.round(f.n.calories)} cal</span>
+                        <span style={{color:"#2E7D32"}}>{Math.round(f.n.protein)}g prot</span>
+                        <span style={{color:"#C97D20"}}>{Math.round(f.n.carbs)}g carbs</span>
+                        <span style={{color:"#5E35B1"}}>{Math.round(f.n.fat)}g fat</span>
+                        <span style={{color:"#00838F"}}>{Math.round(f.n.fiber)}g fiber</span>
+                        {f.n.vitaminD>0&&<span style={{color:"#E65100"}}>{Math.round(f.n.vitaminD)} IU D</span>}
+                        {f.n.iron>0&&<span style={{color:"#AD1457"}}>{f.n.iron.toFixed(1)}mg Fe</span>}
+                        {f.n.omega3>0&&<span style={{color:"#1565C0"}}>{Math.round(f.n.omega3)}mg ω3</span>}
+                      </div>
+                    </div>
+                    <button onClick={()=>setFoods(p=>p.filter(x=>x.id!==f.id))} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+                  </div>
+                ))}
+                <div style={{marginTop:8,padding:"10px 12px",background:"linear-gradient(135deg,#e0f4f7,#e8f5e9)",borderRadius:10,border:"1.5px solid #1A7A8A33"}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#1A7A8A",marginBottom:4}}>TOTALS</div>
+                  <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:11}}>
+                    {[["Cal",nt.calories,"#1A7A8A","kcal"],["Prot",nt.protein,"#2E7D32","g"],
+                      ["Carbs",nt.carbs,"#C97D20","g"],["Fat",nt.fat,"#5E35B1","g"],["Fiber",nt.fiber,"#00838F","g"]].map(([l,v,c,u])=>(
+                      <span key={l} style={{color:c,fontWeight:700}}>{l}: {Math.round(v||0)}{u}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ):(
+              <div style={{textAlign:"center",padding:"28px",color:"#ccc"}}>
+                <div style={{fontSize:36}}>🥗</div>
+                <div style={{fontSize:12,marginTop:6}}>No food logged yet — add your first meal above!</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* WORKOUT */}
+        {tab==="workout"&&(
+          <div>
+            <div style={{background:"white",borderRadius:18,padding:"16px",marginBottom:12,border:"2.5px solid #C97D2066",boxShadow:"0 4px 20px #C97D2012"}}>
+              <div style={{fontSize:14,fontWeight:800,color:"#C97D20",marginBottom:2}}>💪 Log Exercise</div>
+              <div style={{fontSize:11,color:"#999",marginBottom:10}}>
+                "3 sets 10 goblet squats 30 lbs" · "3×12 hip thrusts 45 lbs" · "30 min easy swim"
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <input ref={exRef} value={exInput} onChange={e=>setExInput(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&addExercise()} placeholder="What did you do?" disabled={exLoading}
+                  style={{flex:1,padding:"11px 13px",borderRadius:11,border:"2px solid #f0d8b0",fontSize:13,
+                    fontFamily:"Georgia,serif",outline:"none",background:exLoading?"#f5f5f5":"#FFFBF5"}}/>
+                <button onClick={addExercise} disabled={exLoading||!exInput.trim()}
+                  style={{padding:"11px 18px",borderRadius:11,border:"none",
+                    background:!exLoading&&exInput.trim()?"#C97D20":"#ccc",
+                    color:"white",fontSize:13,fontWeight:700,cursor:!exLoading&&exInput.trim()?"pointer":"default",
+                    fontFamily:"Georgia,serif",minWidth:68}}>
+                  {exLoading?"⏳":"Add"}
+                </button>
+              </div>
+              {exLoading&&<div style={{marginTop:8,fontSize:11,color:"#C97D20",textAlign:"center"}}>⏳ Calculating calories burned...</div>}
+              {exError&&<div style={{marginTop:8,fontSize:11,color:"#EF5350",background:"#fdecea",padding:"7px 10px",borderRadius:8}}>{exError}</div>}
+              <div style={{marginTop:12}}>
+                <div style={{fontSize:10,color:"#bbb",marginBottom:6}}>TAP TO PRE-FILL YOUR EXERCISES:</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                  {PRESETS.map(name=>(
+                    <button key={name} onClick={()=>setExInput(`3 sets of 10 ${name}`)}
+                      style={{padding:"4px 10px",borderRadius:20,border:"1px solid #e0c898",background:"#FFF8F0",
+                        color:"#C97D20",cursor:"pointer",fontSize:10,fontFamily:"Georgia,serif"}}>
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {exercises.length>0?(
+              <div style={{background:"white",borderRadius:15,padding:"14px",border:"1.5px solid #f0d8b0"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#C97D20"}}>Today's Workout — {exercises.length} exercise{exercises.length!==1?"s":""}</div>
+                  <button onClick={()=>setExercises([])} style={{fontSize:11,color:"#EF5350",background:"#fdecea",border:"none",borderRadius:7,padding:"3px 9px",cursor:"pointer"}}>Clear All</button>
+                </div>
+                {exercises.map(e=>{
+                  const d=e.data;
+                  return (
+                    <div key={e.id} style={{padding:"10px 12px",background:"#FFFBF5",borderRadius:10,marginBottom:6,border:"1px solid #f0e0c0"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:12,fontWeight:700,color:"#1a3a3a"}}>{d.name}</div>
+                          <div style={{fontSize:10,color:"#C97D20",fontWeight:600,marginBottom:3}}>{d.muscle_group}</div>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:8,fontSize:10}}>
+                            {d.sets>0&&<span style={{color:"#555"}}>📋 {d.sets}×{d.reps}</span>}
+                            {d.weight_lbs>0&&<span style={{color:"#5E35B1",fontWeight:700}}>🏋️ {d.weight_lbs} lbs</span>}
+                            {d.duration_min>0&&<span style={{color:"#1A7A8A"}}>⏱ {d.duration_min} min</span>}
+                            {d.sets>0&&d.reps>0&&d.weight_lbs>0&&<span style={{color:"#888"}}>Vol: {(d.sets*d.reps*d.weight_lbs).toLocaleString()} lbs</span>}
+                            <span style={{color:"#E65100",fontWeight:700}}>🔥 {Math.round(d.calories_burned)} kcal</span>
+                          </div>
+                          {d.notes&&<div style={{fontSize:10,color:"#2E7D32",marginTop:3,fontStyle:"italic"}}>💡 {d.notes}</div>}
+                        </div>
+                        <button onClick={()=>setExercises(p=>p.filter(x=>x.id!==e.id))} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{marginTop:8,padding:"10px 12px",background:"linear-gradient(135deg,#FFF3E0,#FFF8F0)",borderRadius:10,border:"1.5px solid #C97D2033"}}>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}} className="grid3">
+                    {[{label:"Exercises",val:exercises.length},{label:"Volume",val:totalVolume>0?`${Math.round(totalVolume).toLocaleString()} lbs`:"Bodyweight"},{label:"Burned",val:`${Math.round(totalBurned)} kcal`}].map(s=>(
+                      <div key={s.label} style={{textAlign:"center",background:"white",borderRadius:8,padding:"8px 4px"}}>
+                        <div style={{fontSize:9,color:"#aaa"}}>{s.label}</div>
+                        <div style={{fontSize:14,fontWeight:900,color:"#C97D20",fontFamily:"monospace"}}>{s.val}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {totalBurned>0&&(
+                    <div style={{marginTop:8,fontSize:11,color:"#2E7D32",textAlign:"center",fontWeight:700}}>
+                      🔥 You can eat {Math.round(1525+totalBurned)} kcal today and stay on target
+                    </div>
+                  )}
+                </div>
+              </div>
+            ):(
+              <div style={{textAlign:"center",padding:"28px",color:"#ccc"}}>
+                <div style={{fontSize:36}}>💪</div>
+                <div style={{fontSize:12,marginTop:6}}>No exercises yet — type one above or tap a quick-pick!</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
